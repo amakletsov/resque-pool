@@ -25,6 +25,8 @@ module Resque
     def initialize(config_loader=nil)
       init_config(config_loader)
       @workers = Hash.new { |workers, queues| workers[queues] = {} }
+      @redis = Redis.new({"host"=>"redis", "port"=>6379})
+      @hostname = `hostname`[0..-2]
       procline "(initialized)"
     end
 
@@ -299,6 +301,7 @@ module Resque
 
     def join
       loop do
+        quit_terminated_workers
         reap_all_workers
         break if handle_sig_queue! == :break
         if sig_queue.empty?
@@ -395,6 +398,27 @@ module Resque
       delta = -worker_delta_for(queues)
       pids_for(queues)[0...delta].each do |pid|
         Process.kill("QUIT", pid)
+      end
+    end
+
+    # Workers terminated by users
+    # 
+    # Resque-web adds a pid to kill to a redis list
+    #   key: "cutting_block_#{@hostname}"
+    #
+    # On every manager loop, we check this list for killable workers
+    def quit_terminated_workers
+      loop do
+        # Get the next worker to kill, if any
+        pid = @redis.lpop("cutting_block_#{@hostname}") rescue nil
+        break if pid.nil?
+
+        # Reset expiration
+        @redis.expire("cutting_block_#{@hostname}", 60 * 5)
+
+        # Kill that dang worker
+        log "Killing worker at user's behest: #{pid}"
+        Process.kill("QUIT", pid.to_i)
       end
     end
 
